@@ -364,7 +364,7 @@ function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentVi
               <span
                 aria-hidden="true"
                 className={cn(
-                  "sticky left-0 z-10 shrink-0 select-none px-3 text-right text-[var(--paperclip-code-gutter-fg,theme(colors.muted.foreground))] opacity-70",
+                  "sticky left-0 z-10 shrink-0 select-none pl-3 pr-4 text-right text-[var(--paperclip-code-gutter-fg,theme(colors.muted.foreground))] opacity-70",
                   "bg-[var(--paperclip-code-bg,theme(colors.muted.DEFAULT))]",
                   isHighlighted &&
                     "opacity-100 bg-[var(--paperclip-code-highlight-bg,rgba(250,204,21,0.12))] border-l-2 border-[var(--paperclip-code-highlight-border,rgb(234,179,8))]",
@@ -608,28 +608,30 @@ export function FileViewerSheet({
             </div>
           </div>
           {resolvedResource ? (
-            <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-              <span
-                className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5"
-                title={resolvedResource.workspaceLabel}
-              >
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+              <span title={resolvedResource.workspaceLabel}>
                 From {resolvedResource.workspaceLabel}
               </span>
               {resolvedResource.previewKind ? (
-                <span className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5 capitalize">
-                  {resolvedResource.previewKind}
-                </span>
+                <>
+                  <span aria-hidden="true" className="opacity-50">·</span>
+                  <span className="capitalize">{resolvedResource.previewKind}</span>
+                </>
               ) : null}
               {formatBytes(resolvedResource.byteSize) ? (
-                <span className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5">
-                  {formatBytes(resolvedResource.byteSize)}
-                </span>
+                <>
+                  <span aria-hidden="true" className="opacity-50">·</span>
+                  <span>{formatBytes(resolvedResource.byteSize)}</span>
+                </>
               ) : null}
               {state?.line ? (
-                <span className="inline-flex items-center rounded-full border border-border bg-muted px-2 py-0.5">
-                  Line {state.line}
-                  {state.column ? `, Col ${state.column}` : ""}
-                </span>
+                <>
+                  <span aria-hidden="true" className="opacity-50">·</span>
+                  <span>
+                    Line {state.line}
+                    {state.column ? `, Col ${state.column}` : ""}
+                  </span>
+                </>
               ) : null}
             </div>
           ) : null}
