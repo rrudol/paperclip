@@ -1021,6 +1021,7 @@ export {
   linkIssueApprovalSchema,
   createIssueAttachmentMetadataSchema,
   createIssueWorkProductSchema,
+  issueWorkProductMetadataSchema,
   updateIssueWorkProductSchema,
   attachmentArtifactWorkProductMetadataSchema,
   issueWorkProductTypeSchema,
