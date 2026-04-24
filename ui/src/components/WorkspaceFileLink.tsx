@@ -57,8 +57,8 @@ export function WorkspaceFileLink({
       return;
     }
     if (event.button !== 0) return;
-    if (!canOpen) return;
     event.preventDefault();
+    if (!canOpen) return;
     if (onOpen) onOpen(workspaceFileRef);
     else viewer?.open(workspaceFileRef);
   };

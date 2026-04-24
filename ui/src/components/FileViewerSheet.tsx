@@ -76,22 +76,6 @@ function formatBytes(size: number | null | undefined): string | null {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function decodeBase64ToBytes(data: string): Uint8Array {
-  const raw = globalThis.atob ? globalThis.atob(data) : "";
-  const bytes = new Uint8Array(raw.length);
-  for (let index = 0; index < raw.length; index += 1) {
-    bytes[index] = raw.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function bytesToDataUrl(bytes: Uint8Array, contentType: string | null | undefined): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  const encoded = globalThis.btoa ? globalThis.btoa(binary) : "";
-  return `data:${contentType ?? "application/octet-stream"};base64,${encoded}`;
-}
-
 function splitContentIntoLines(data: string): string[] {
   if (data === "") return [""];
   const normalized = data.replace(/\r\n?/g, "\n");
@@ -304,9 +288,8 @@ function FileContentViewer({ content, highlightedLine, onLoaded }: FileContentVi
   }, [highlightedLine]);
 
   if (resource.previewKind === "image") {
-    const encoded = content.content.encoding === "base64" ? content.content.data : content.content.data;
     const dataUrl = content.content.encoding === "base64"
-      ? bytesToDataUrl(decodeBase64ToBytes(encoded), resource.contentType)
+      ? `data:${resource.contentType ?? "application/octet-stream"};base64,${content.content.data}`
       : null;
     if (!dataUrl) {
       return (
