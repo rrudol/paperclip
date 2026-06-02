@@ -78,6 +78,7 @@ function resolveOpenCodeBiller(env: Record<string, string>, provider: string | n
 
 const REMOTE_OPENCODE_MODELS_PROBE_DEFAULT_TIMEOUT_SEC = 20;
 const REMOTE_OPENCODE_MODELS_PROBE_SANDBOX_TIMEOUT_SEC = 120;
+const DEFAULT_OPENCODE_OUTPUT_IDLE_TIMEOUT_SEC = 5 * 60;
 
 async function ensureRemoteOpenCodeModelConfiguredAndAvailable(input: {
   runId: string;
@@ -311,6 +312,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       asNumber(config.timeoutSec, 0),
     );
     const graceSec = asNumber(config.graceSec, 20);
+    const outputIdleTimeoutSec = Math.max(
+      0,
+      Math.floor(asNumber(config.outputIdleTimeoutSec, DEFAULT_OPENCODE_OUTPUT_IDLE_TIMEOUT_SEC)),
+    );
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({
       runId,
       target: executionTarget,
@@ -579,6 +584,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stdin: prompt,
         timeoutSec,
         graceSec,
+        outputIdleTimeoutSec,
         onSpawn,
         onLog,
       });
@@ -591,7 +597,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const toResult = (
       attempt: {
-        proc: { exitCode: number | null; signal: string | null; timedOut: boolean; stdout: string; stderr: string };
+        proc: {
+          exitCode: number | null;
+          signal: string | null;
+          timedOut: boolean;
+          timeoutReason?: "wall" | "output_idle" | null;
+          stdout: string;
+          stderr: string;
+        };
         rawStderr: string;
         parsed: ReturnType<typeof parseOpenCodeJsonl>;
       },
@@ -602,7 +615,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           exitCode: attempt.proc.exitCode,
           signal: attempt.proc.signal,
           timedOut: true,
-          errorMessage: `Timed out after ${timeoutSec}s`,
+          errorMessage:
+            attempt.proc.timeoutReason === "output_idle"
+              ? `No OpenCode output for ${outputIdleTimeoutSec}s`
+              : `Timed out after ${timeoutSec}s`,
           clearSession: clearSessionOnMissingSession,
         };
       }

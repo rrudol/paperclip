@@ -467,9 +467,31 @@ describe("runChildProcess", () => {
 
     descendantPid = Number.parseInt(result.stdout.trim(), 10);
     expect(result.timedOut).toBe(true);
+    expect(result.timeoutReason).toBe("wall");
     expect(Number.isInteger(descendantPid) && descendantPid > 0).toBe(true);
 
     expect(await waitForPidExit(descendantPid!, 2_000)).toBe(true);
+  });
+
+  it("terminates a silent process after the output idle timeout", async () => {
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000);"],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 0,
+        graceSec: 1,
+        outputIdleTimeoutSec: 0.1,
+        onLog: async () => {},
+      },
+    );
+
+    expect(result.timedOut).toBe(true);
+    expect(result.timeoutReason).toBe("output_idle");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
   });
 
   it.skipIf(process.platform === "win32")("cleans up a lingering process group after terminal output and child exit", async () => {
