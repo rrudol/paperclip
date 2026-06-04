@@ -135,4 +135,55 @@ describe("redaction", () => {
     expect(result?.args).toEqual(["--api-key", "not-a-command-secret"]);
     expect(result?.argv).toEqual(["--api-key", REDACTED_EVENT_VALUE]);
   });
+
+  // RUD-611: run-log secret exposure. These payloads mirror the shape of the
+  // command output that leaked into CTO run 529d60cb (synthetic secret values).
+  describe("RUD-611 run-log credential exposure", () => {
+    const fakePassword = "S3cr3tPwAbc123XYZ";
+    const fakeBase64 = "U0VDUkVUX1ZBTFVFX0RPX05PVF9MT0c="; // base64("SECRET_VALUE_DO_NOT_LOG")
+
+    it("redacts decrypted Kubernetes Secret data dumped to stdout (sops -d / kubectl get secret -o yaml)", () => {
+      const input = [
+        "apiVersion: v1",
+        "data:",
+        `    DATABASE_URL: ${fakeBase64}`,
+        `    S3_SECRET_KEY: ${fakeBase64}`,
+        "    S3_ENDPOINT: aHR0cHM6Ly9zMy5leGFtcGxlLmNvbQ==",
+        "kind: Secret",
+        "metadata:",
+        "    name: parse-pipeline-secrets",
+      ].join("\n");
+
+      const result = redactSensitiveText(input);
+
+      expect(result).not.toContain(fakeBase64);
+      expect(result).toContain(REDACTED_EVENT_VALUE);
+      expect(result).toContain("kind: Secret"); // structure preserved
+    });
+
+    it("redacts a database password embedded inline in a command string", () => {
+      const input =
+        `DATABASE_URL='postgresql://pipeline_user:${fakePassword}@10.0.0.1:5432/app?sslmode=disable'` +
+        ` psql "$DATABASE_URL" -c "select 1"`;
+
+      const result = redactSensitiveText(input);
+
+      expect(result).not.toContain(fakePassword);
+      expect(result).toContain(REDACTED_EVENT_VALUE);
+    });
+
+    it("redacts a database password embedded in a connection URI inside program text", () => {
+      const input = `DSN = "postgresql+psycopg://pipeline_user:${fakePassword}@db.internal:5432/app"`;
+
+      const result = redactSensitiveText(input);
+
+      expect(result).not.toContain(fakePassword);
+      expect(result).toContain(REDACTED_EVENT_VALUE);
+    });
+
+    it("leaves ordinary command output untouched", () => {
+      const input = "Cloned repo. 142 files changed. GET https://example.com/api/overview -> 200 in 0.31s";
+      expect(redactSensitiveText(input)).toBe(input);
+    });
+  });
 });

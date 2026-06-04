@@ -1,7 +1,7 @@
 import { redactCommandText } from "@paperclipai/adapter-utils";
 
 const SECRET_FIELD_NAME_PATTERN =
-  String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|access[-_]?token|auth(?:_?token)?|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connectionstring)[A-Za-z0-9_-]*`;
+  String.raw`[A-Za-z0-9_-]*(?:api[-_]?key|access[-_]?token|auth(?:_?token)?|token|authorization|bearer|secret|passwd|password|credential|jwt|private[-_]?key|cookie|connection[-_]?string|connectionstring|database[-_]?url|db[-_]?url|database[-_]?uri|conn(?:ection)?[-_]?uri|dsn)[A-Za-z0-9_-]*`;
 
 const SECRET_PAYLOAD_KEY_RE = new RegExp(SECRET_FIELD_NAME_PATTERN, "i");
 const COMMAND_PAYLOAD_KEY_RE =
@@ -17,6 +17,21 @@ const ESCAPED_JSON_SECRET_FIELD_TEXT_RE = new RegExp(
   String.raw`((?:\\")?${SECRET_FIELD_NAME_PATTERN}(?:\\")?\s*:\s*(?:\\"))[^\\\r\n]+((?:\\"))`,
   "gi",
 );
+// Unquoted `secretKey: value` / `secretKey = value` lines (YAML, k8s Secret
+// data/stringData, .env dumps). The quoted JSON/YAML forms are handled by the
+// rules above, so this only fires when the value is NOT quoted.
+const YAML_SECRET_FIELD_TEXT_RE = new RegExp(
+  String.raw`(^[ \t]*-?[ \t]*(?:"|')?${SECRET_FIELD_NAME_PATTERN}(?:"|')?[ \t]*[:=][ \t]*)(?!["'])([^\r\n#]+?)[ \t]*$`,
+  "gim",
+);
+// Credentials embedded in a connection URI: scheme://user:PASSWORD@host. Masks
+// only the password component; scheme, user and host stay for debuggability.
+const URI_CREDENTIAL_TEXT_RE = /\b([a-z][a-z0-9+.\-]*:\/\/[^\s:/@]+:)([^\s/@]+)(@)/gi;
+// Any base64 value inside a decrypted Kubernetes Secret dump (`kind: Secret`
+// with a data:/stringData: map). Gated on `kind: Secret` so it never touches
+// ordinary base64 in normal output.
+const K8S_SECRET_DATA_LINE_RE = /^([ \t]+[A-Za-z0-9_.\-]+:[ \t]*)([A-Za-z0-9+/]{16,}={0,2})[ \t]*$/gm;
+const K8S_SECRET_MARKER_RE = /\bkind:\s*["']?Secret\b/;
 const SECRET_TEXT_HINTS = [
   "api",
   "key",
@@ -30,6 +45,9 @@ const SECRET_TEXT_HINTS = [
   "private",
   "cookie",
   "connectionstring",
+  "database",
+  "dsn",
+  "://",
   "sk-",
   "ghp_",
   "gho_",
@@ -125,10 +143,16 @@ export function redactEventPayload(payload: Record<string, unknown> | null): Rec
 
 export function redactSensitiveText(input: string): string {
   if (!maybeContainsSecretText(input)) return input;
-  return redactCommandText(
+  let result = redactCommandText(
     input
       .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
-      .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`),
+      .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
+      .replace(YAML_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}`)
+      .replace(URI_CREDENTIAL_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$3`),
     REDACTED_EVENT_VALUE,
   );
+  if (K8S_SECRET_MARKER_RE.test(result)) {
+    result = result.replace(K8S_SECRET_DATA_LINE_RE, `$1${REDACTED_EVENT_VALUE}`);
+  }
+  return result;
 }
