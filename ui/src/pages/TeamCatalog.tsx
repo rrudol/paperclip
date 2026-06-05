@@ -174,19 +174,19 @@ function titleCase(slug: string): string {
 }
 
 function encodeTeamFilePath(filePath: string): string {
-  return filePath.split("/").map(encodeURIComponent).join("~");
+  return filePath.split("/").map(encodeURIComponent).join("%7E");
 }
 
 function decodeTeamFilePath(encoded: string | undefined): string | null {
   if (!encoded) return null;
-  return encoded.split("~").map(decodeURIComponent).join("/");
+  return encoded.split("%7E").map(decodeURIComponent).join("/");
 }
 
 type ParsedRoute = { catalogRef: string | null; filePath: string | null };
 
 const TEAM_CATALOG_ROUTE_ROOT = "/teams-catalog";
 
-function parseTeamRoute(routePath: string | undefined): ParsedRoute {
+export function parseTeamRoute(routePath: string | undefined): ParsedRoute {
   if (!routePath) return { catalogRef: null, filePath: null };
   const segments = routePath.split("/").filter(Boolean);
   if (segments.length === 0) return { catalogRef: null, filePath: null };
@@ -197,7 +197,7 @@ function parseTeamRoute(routePath: string | undefined): ParsedRoute {
   return { catalogRef, filePath: null };
 }
 
-function teamRoute(catalogRef: string, filePath?: string | null): string {
+export function teamRoute(catalogRef: string, filePath?: string | null): string {
   const base = `${TEAM_CATALOG_ROUTE_ROOT}/${encodeURIComponent(catalogRef)}`;
   if (filePath) return `${base}/files/${encodeTeamFilePath(filePath)}`;
   return base;

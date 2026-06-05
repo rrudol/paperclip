@@ -1010,10 +1010,17 @@ export function teamsCatalogService(db: Db) {
     if (importPreview.errors.length > 0) {
       throw unprocessable(`Catalog team import preview has errors: ${importPreview.errors.join("; ")}`);
     }
+    const defaultedAdapterSlugs = prepared.team.agentSlugs.filter(
+      (slug) => !options.adapterOverrides?.[slug],
+    );
     const warnings = [
       ...prepared.warnings,
       ...importPreview.warnings,
-      `Catalog agents without explicit overrides default to ${DEFAULT_SAFE_CATALOG_ADAPTER_TYPE}. Pass adapterOverrides to use a different supported adapter.`,
+      ...(defaultedAdapterSlugs.length > 0
+        ? [
+            `Catalog agents without explicit overrides (${defaultedAdapterSlugs.join(", ")}) default to ${DEFAULT_SAFE_CATALOG_ADAPTER_TYPE}. Pass adapterOverrides to use a different supported adapter.`,
+          ]
+        : []),
       ...await prepareSkillInstalls(companyId, prepared),
     ];
     const result = await portability.importBundle(

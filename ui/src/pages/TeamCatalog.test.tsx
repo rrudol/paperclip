@@ -8,7 +8,7 @@ import type {
   CatalogTeamImportPreviewResult,
 } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TeamCatalog } from "./TeamCatalog";
+import { TeamCatalog, parseTeamRoute, teamRoute } from "./TeamCatalog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const mockTeamCatalogApi = vi.hoisted(() => ({
@@ -84,6 +84,18 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
+
+describe("TeamCatalog routes", () => {
+  it("round-trips file paths containing literal tildes", () => {
+    const route = teamRoute("paperclipai/bundled/test/team", "agents/a~b/AGENTS.md");
+
+    expect(route).toBe("/teams-catalog/paperclipai%2Fbundled%2Ftest%2Fteam/files/agents%7Ea~b%7EAGENTS.md");
+    expect(parseTeamRoute(route.replace("/teams-catalog/", ""))).toEqual({
+      catalogRef: "paperclipai/bundled/test/team",
+      filePath: "agents/a~b/AGENTS.md",
+    });
+  });
+});
 
 async function act(callback: () => void | Promise<void>) {
   let result: void | Promise<void> = undefined;

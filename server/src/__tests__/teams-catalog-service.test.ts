@@ -291,6 +291,22 @@ describe("teamsCatalogService", () => {
     });
   });
 
+  it("omits the default-adapter warning when every agent has an explicit override", async () => {
+    const svc = teamsCatalogService({} as any);
+
+    const result = await svc.installCatalogTeam("company-1", "core-exec-team", {
+      adapterOverrides: {
+        ceo: { adapterType: "opencode_local" },
+        cto: { adapterType: "opencode_local" },
+        qa: { adapterType: "opencode_local" },
+      },
+    });
+
+    expect(result.warnings).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("default to claude_local")]),
+    );
+  });
+
   it("passes install secretValues through to company portability import", async () => {
     const svc = teamsCatalogService({} as any);
 
