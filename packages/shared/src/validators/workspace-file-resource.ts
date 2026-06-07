@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+const workspaceFileListSearchMaxBytes = 128;
+
+function utf8ByteLength(value: string) {
+  return new TextEncoder().encode(value).length;
+}
+
 export const workspaceFileWorkspaceKindSchema = z.enum(["execution_workspace", "project_workspace"]);
 export const workspaceFileSelectorSchema = z.enum(["auto", "execution", "project"]).default("auto");
 export const workspaceFileListModeSchema = z.enum(["all", "recent", "changed"]).default("all");
@@ -33,13 +39,16 @@ export const workspaceFileListQuerySchema = z.object({
   mode: workspaceFileListModeSchema.optional(),
   q: z
     .string()
-    .max(200)
     .refine((value) => !/[\x00-\x1f\x7f]/.test(value), {
       message: "Workspace file search contains an invalid character",
       params: { code: "invalid_query" },
     })
+    .refine((value) => utf8ByteLength(value.trim()) <= workspaceFileListSearchMaxBytes, {
+      message: "Workspace file search is too long",
+      params: { code: "invalid_query" },
+    })
     .optional(),
-  limit: z.coerce.number().int().min(1).max(500).default(100),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
 });
 
 export const resolvedWorkspaceResourceSchema = z.object({

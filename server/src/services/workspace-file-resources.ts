@@ -19,12 +19,12 @@ import { HttpError, notFound, unprocessable } from "../errors.js";
 
 export const WORKSPACE_FILE_TEXT_MAX_BYTES = 512 * 1024;
 export const WORKSPACE_FILE_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
-export const WORKSPACE_FILE_LIST_DEFAULT_LIMIT = 100;
-export const WORKSPACE_FILE_LIST_MAX_LIMIT = 500;
+export const WORKSPACE_FILE_LIST_DEFAULT_LIMIT = 25;
+export const WORKSPACE_FILE_LIST_MAX_LIMIT = 100;
 export const WORKSPACE_FILE_LIST_MAX_SCANNED_ENTRIES = 5_000;
 const MAX_RELATIVE_PATH_BYTES = 4096;
 const TEXT_SNIFF_BYTES = 4096;
-const MAX_LIST_DEPTH = 16;
+const MAX_LIST_DEPTH = 20;
 const GIT_STATUS_MAX_BUFFER_BYTES = 1024 * 1024;
 const execFileAsync = promisify(execFile);
 
@@ -470,15 +470,15 @@ async function listLocalFileCandidate(input: {
   let targetReal: string;
   let stat;
   try {
+    stat = await fs.lstat(targetLexical);
+    if (stat.isSymbolicLink() || !stat.isFile()) return null;
     targetReal = await fs.realpath(targetLexical);
     if (!isInsideRoot(input.rootReal, targetReal)) return null;
     const realRelative = relativePathFromReal(input.rootReal, targetReal);
     if (shouldPruneSegments(realRelative.split("/").filter(Boolean))) return null;
-    stat = await fs.lstat(targetLexical);
   } catch {
     return null;
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) return null;
   return listItemFromStat({ candidate: input.candidate, relativePath: normalized.relativePath, stat });
 }
 
@@ -563,6 +563,7 @@ async function enumerateWorkspaceFiles(input: {
 function parseGitStatusPaths(stdout: string) {
   const tokens = stdout.split("\0").filter(Boolean);
   const paths: string[] = [];
+  let hitScanCap = false;
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i]!;
     if (token.length < 4) continue;
@@ -570,9 +571,12 @@ function parseGitStatusPaths(stdout: string) {
     const filePath = token.slice(3);
     if (filePath) paths.push(filePath);
     if (status.includes("R") || status.includes("C")) i += 1;
-    if (paths.length >= WORKSPACE_FILE_LIST_MAX_SCANNED_ENTRIES) break;
+    if (paths.length >= WORKSPACE_FILE_LIST_MAX_SCANNED_ENTRIES) {
+      hitScanCap = true;
+      break;
+    }
   }
-  return paths;
+  return { paths, hitScanCap };
 }
 
 async function listChangedWorkspaceFiles(input: {
@@ -593,7 +597,7 @@ async function listChangedWorkspaceFiles(input: {
     return { unavailableReason: "changed_unavailable" as const };
   }
 
-  const paths = parseGitStatusPaths(stdout);
+  const { paths, hitScanCap } = parseGitStatusPaths(stdout);
   const items: WorkspaceFileListItem[] = [];
   let scannedCount = 0;
   for (const filePath of paths) {
@@ -611,7 +615,7 @@ async function listChangedWorkspaceFiles(input: {
   return {
     items,
     scannedCount,
-    truncated: paths.length > scannedCount || items.length >= input.limit,
+    truncated: hitScanCap || paths.length > scannedCount || items.length >= input.limit,
   };
 }
 

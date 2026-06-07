@@ -33,10 +33,14 @@ export function createFileResourceLimiter(opts: {
   maxConcurrent?: number;
   maxRequests?: number;
   windowMs?: number;
+  requestLimitMessage?: string;
+  concurrencyLimitMessage?: string;
 } = {}): FileResourceLimiter {
   const maxConcurrent = opts.maxConcurrent ?? 6;
   const maxRequests = opts.maxRequests ?? 120;
   const windowMs = opts.windowMs ?? 60_000;
+  const requestLimitMessage = opts.requestLimitMessage ?? "Too many file preview requests";
+  const concurrencyLimitMessage = opts.concurrencyLimitMessage ?? "Too many concurrent file preview requests";
   const activeByKey = new Map<string, number>();
   const windowsByKey = new Map<string, { startedAt: number; count: number }>();
 
@@ -52,13 +56,13 @@ export function createFileResourceLimiter(opts: {
       } else {
         window.count += 1;
         if (window.count > maxRequests) {
-          throw new HttpError(429, "Too many file preview requests");
+          throw new HttpError(429, requestLimitMessage, { code: "rate_limited" });
         }
       }
 
       const active = activeByKey.get(key) ?? 0;
       if (active >= maxConcurrent) {
-        throw new HttpError(429, "Too many concurrent file preview requests");
+        throw new HttpError(429, concurrencyLimitMessage, { code: "concurrency_limited" });
       }
       activeByKey.set(key, active + 1);
       return () => {
@@ -68,6 +72,20 @@ export function createFileResourceLimiter(opts: {
       };
     },
   };
+}
+
+export function createFileResourceListLimiter(opts: {
+  maxConcurrent?: number;
+  maxRequests?: number;
+  windowMs?: number;
+} = {}): FileResourceLimiter {
+  return createFileResourceLimiter({
+    maxConcurrent: opts.maxConcurrent ?? 2,
+    maxRequests: opts.maxRequests ?? 30,
+    windowMs: opts.windowMs,
+    requestLimitMessage: "Too many workspace file list requests",
+    concurrencyLimitMessage: "Too many concurrent workspace file list requests",
+  });
 }
 
 function limiterKey(companyId: string, actorId: string, issueId: string) {
@@ -103,6 +121,7 @@ function readListQuery(query: unknown) {
         (issue) => (issue as { params?: { code?: string } }).params?.code === "invalid_query",
       );
       if (refinement) throw unprocessable(refinement.message, { code: "invalid_query" });
+      throw unprocessable("Workspace file list query is invalid", { code: "invalid_query" });
     }
     throw error;
   }
@@ -134,6 +153,45 @@ function activityDetails(input: {
   };
 }
 
+function listActivityDetails(input: {
+  outcome: "success" | "denied" | "unavailable";
+  workspaceSelector: "auto" | "execution" | "project";
+  mode: "all" | "recent" | "changed";
+  workspaceKind?: string | null;
+  workspaceId?: string | null;
+  resultCount?: number | null;
+  scannedCount?: number | null;
+  truncated?: boolean | null;
+  denialReason?: string | null;
+}) {
+  return {
+    outcome: input.outcome,
+    workspaceSelector: input.workspaceSelector,
+    mode: input.mode,
+    ...(input.workspaceKind ? { workspaceKind: input.workspaceKind } : {}),
+    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    ...(typeof input.resultCount === "number" ? { resultCount: input.resultCount } : {}),
+    ...(typeof input.scannedCount === "number" ? { scannedCount: input.scannedCount } : {}),
+    ...(typeof input.truncated === "boolean" ? { truncated: input.truncated } : {}),
+    ...(input.denialReason ? { denialReason: input.denialReason } : {}),
+  };
+}
+
+function safeListAuditQuery(query: unknown): {
+  workspace: "auto" | "execution" | "project";
+  mode: "all" | "recent" | "changed";
+} {
+  if (!query || typeof query !== "object") return { workspace: "auto", mode: "all" };
+  const record = query as Record<string, unknown>;
+  const workspace = typeof record.workspace === "string" && ["auto", "execution", "project"].includes(record.workspace)
+    ? (record.workspace as "auto" | "execution" | "project")
+    : "auto";
+  const mode = typeof record.mode === "string" && ["all", "recent", "changed"].includes(record.mode)
+    ? (record.mode as "all" | "recent" | "changed")
+    : "all";
+  return { workspace, mode };
+}
+
 function denialReasonFromError(error: unknown) {
   if (!(error instanceof HttpError)) return "unknown";
   const details = error.details;
@@ -147,10 +205,12 @@ function denialReasonFromError(error: unknown) {
 export function fileResourceRoutes(db: Db, opts: {
   service?: WorkspaceFileResourceService;
   limiter?: FileResourceLimiter;
+  listLimiter?: FileResourceLimiter;
 } = {}) {
   const router = Router();
   const svc = opts.service ?? workspaceFileResourceService(db);
   const limiter = opts.limiter ?? createFileResourceLimiter();
+  const listLimiter = opts.listLimiter ?? createFileResourceListLimiter();
 
   async function logDeniedAttempt(input: {
     companyId: string;
@@ -176,34 +236,125 @@ export function fileResourceRoutes(db: Db, opts: {
     });
   }
 
+  async function logListDeniedAttempt(input: {
+    companyId: string;
+    actor: ReturnType<typeof getActorInfo>;
+    issueId: string;
+    query: { workspace: "auto" | "execution" | "project"; mode: "all" | "recent" | "changed" };
+    error: unknown;
+  }) {
+    await logActivity(db, {
+      companyId: input.companyId,
+      actorType: input.actor.actorType,
+      actorId: input.actor.actorId,
+      action: "issue.file_resource_list_denied",
+      entityType: "issue",
+      entityId: input.issueId,
+      agentId: input.actor.agentId,
+      runId: input.actor.runId,
+      details: listActivityDetails({
+        outcome: "denied",
+        workspaceSelector: input.query.workspace,
+        mode: input.query.mode,
+        denialReason: denialReasonFromError(input.error),
+      }),
+    });
+  }
+
   router.get("/issues/:issueId/file-resources/list", async (req, res) => {
-    assertBoard(req);
+    const auditQuery = safeListAuditQuery(req.query);
+    try {
+      assertBoard(req);
+    } catch (error) {
+      if (req.actor.type === "agent" && req.actor.companyId) {
+        await logListDeniedAttempt({
+          companyId: req.actor.companyId,
+          actor: getActorInfo(req),
+          issueId: req.params.issueId,
+          query: auditQuery,
+          error,
+        });
+      }
+      throw error;
+    }
     const issue = await svc.getIssue(req.params.issueId);
-    assertCompanyAccess(req, issue.companyId);
     const actor = getActorInfo(req);
-    const query = readListQuery(req.query);
-    const release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+    try {
+      assertCompanyAccess(req, issue.companyId);
+    } catch (error) {
+      await logListDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        query: auditQuery,
+        error,
+      });
+      throw error;
+    }
+
+    let query: ReturnType<typeof readListQuery>;
+    try {
+      query = readListQuery(req.query);
+    } catch (error) {
+      await logListDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        query: auditQuery,
+        error,
+      });
+      throw error;
+    }
+
+    let release: (() => void) | null = null;
+    try {
+      release = listLimiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+    } catch (error) {
+      await logListDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        query,
+        error,
+      });
+      throw error;
+    }
+
     try {
       const result = await svc.list(req.params.issueId, query);
       await logActivity(db, {
         companyId: issue.companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
-        action: "issue.file_resource_list_read",
+        action: "issue.file_resource_list",
         entityType: "issue",
         entityId: req.params.issueId,
         agentId: actor.agentId,
         runId: actor.runId,
-        details: activityDetails({
+        details: listActivityDetails({
           outcome: result.state === "available" ? "success" : "unavailable",
+          workspaceSelector: result.query.workspace,
+          mode: result.query.mode,
           workspaceKind: result.workspace?.workspaceKind ?? null,
           workspaceId: result.workspace?.workspaceId ?? null,
+          resultCount: result.items.length,
+          scannedCount: result.scannedCount,
+          truncated: result.truncated,
           denialReason: result.unavailableReason ?? null,
         }),
       });
       res.json(result);
+    } catch (error) {
+      await logListDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        query,
+        error,
+      });
+      throw error;
     } finally {
-      release();
+      release?.();
     }
   });
 

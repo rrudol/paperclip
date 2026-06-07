@@ -5,10 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, companies, createDb, executionWorkspaces, goals, issues, projects, projectWorkspaces, type Db } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, executionWorkspaces, goals, issues, projects, projectWorkspaces, type Db } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { errorHandler } from "../middleware/index.js";
-import { createFileResourceLimiter, fileResourceRoutes, type WorkspaceFileResourceService } from "../routes/file-resources.js";
+import {
+  createFileResourceLimiter,
+  createFileResourceListLimiter,
+  fileResourceRoutes,
+  type WorkspaceFileResourceService,
+} from "../routes/file-resources.js";
 import {
   WORKSPACE_FILE_TEXT_MAX_BYTES,
   workspaceFileResourceService,
@@ -139,14 +144,18 @@ async function seedGraph(db: Db, input: {
   };
 }
 
-function createApp(db: Db, actor: Request["actor"]) {
+function createApp(
+  db: Db,
+  actor: Request["actor"],
+  routeOpts: Parameters<typeof fileResourceRoutes>[1] = {},
+) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     req.actor = actor;
     next();
   });
-  app.use("/api", fileResourceRoutes(db));
+  app.use("/api", fileResourceRoutes(db, routeOpts));
   app.use(errorHandler);
   return app;
 }
@@ -241,6 +250,53 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(JSON.stringify(res.body)).not.toContain("blob.bin");
   });
 
+  it("enforces default and hard list/search caps", async () => {
+    const { projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    await fs.mkdir(path.join(projectRoot, "src"), { recursive: true });
+    await Promise.all(
+      Array.from({ length: 30 }, (_, index) =>
+        fs.writeFile(
+          path.join(projectRoot, "src", `file-${String(index).padStart(2, "0")}.ts`),
+          "export {}\n",
+          "utf8",
+        ),
+      ),
+    );
+    const tooDeepDir = path.join(projectRoot, ...Array.from({ length: 21 }, (_, index) => `deep-${index}`));
+    await fs.mkdir(tooDeepDir, { recursive: true });
+    await fs.writeFile(path.join(tooDeepDir, "too-deep.ts"), "export const hidden = true;\n", "utf8");
+
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+
+    const defaultLimit = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({ workspace: "project", mode: "all" });
+    expect(defaultLimit.status).toBe(200);
+    expect(defaultLimit.body.query.limit).toBe(25);
+    expect(defaultLimit.body.items).toHaveLength(25);
+    expect(defaultLimit.body.truncated).toBe(true);
+
+    const tooLargeLimit = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({ workspace: "project", mode: "all", limit: 101 });
+    expect(tooLargeLimit.status).toBe(422);
+    expect(tooLargeLimit.body?.details?.code).toBe("invalid_query");
+
+    const tooDeep = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({ workspace: "project", mode: "all", q: "too-deep", limit: 100 });
+    expect(tooDeep.status).toBe(200);
+    expect(tooDeep.body.items).toEqual([]);
+    expect(tooDeep.body.truncated).toBe(true);
+  });
+
   it("supports recent mode, limit caps, and list activity logging", async () => {
     const { projectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, executionRoot });
@@ -263,9 +319,47 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(res.body.truncated).toBe(true);
 
     const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
-    const listRead = rows.find((row) => row.action === "issue.file_resource_list_read");
+    const listRead = rows.find((row) => row.action === "issue.file_resource_list");
     expect(listRead).toBeTruthy();
+    expect(listRead?.details).toMatchObject({
+      outcome: "success",
+      workspaceSelector: "project",
+      mode: "recent",
+      resultCount: 1,
+      truncated: true,
+    });
     expect(JSON.stringify(listRead?.details)).not.toContain(projectRoot);
+    expect(JSON.stringify(listRead?.details)).not.toContain("old.ts");
+    expect(JSON.stringify(listRead?.details)).not.toContain("new.ts");
+  });
+
+  it("rejects overlong list searches and redacts the raw query from denial audit details", async () => {
+    const { projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    const app = createApp(db, {
+      type: "board",
+      userId: "board-user",
+      companyIds: [graph.companyId],
+      source: "session",
+      isInstanceAdmin: false,
+    });
+    const rawQuery = "é".repeat(65);
+
+    const res = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/list`)
+      .query({ workspace: "project", q: rawQuery });
+
+    expect(res.status).toBe(422);
+    expect(res.body?.details?.code).toBe("invalid_query");
+    const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
+    const denied = rows.find((row) => row.action === "issue.file_resource_list_denied");
+    expect(denied?.details).toMatchObject({
+      outcome: "denied",
+      workspaceSelector: "project",
+      mode: "all",
+      denialReason: "invalid_query",
+    });
+    expect(JSON.stringify(denied?.details)).not.toContain(rawQuery);
   });
 
   it("rejects control characters in the path without crashing the audit log", async () => {
@@ -418,10 +512,19 @@ describeEmbeddedPostgres("workspace file resources", () => {
     const { projectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, executionRoot });
     await fs.writeFile(path.join(projectRoot, "README.md"), "# Secret\n", "utf8");
+    const agentId = crypto.randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId: graph.companyId,
+      name: "File audit agent",
+      role: "engineer",
+      adapterType: "process",
+      adapterConfig: {},
+    });
 
     const agentApp = createApp(db, {
       type: "agent",
-      agentId: crypto.randomUUID(),
+      agentId,
       companyId: graph.companyId,
       source: "agent_key",
     });
@@ -437,6 +540,11 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect((await request(boardApp).get(`/api/issues/${graph.issueId}/file-resources/content`).query({ path: "README.md" })).status).toBe(403);
     expect((await request(agentApp).get(`/api/issues/${graph.issueId}/file-resources/list`)).status).toBe(403);
     expect((await request(boardApp).get(`/api/issues/${graph.issueId}/file-resources/list`)).status).toBe(403);
+
+    const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
+    const listDenials = rows.filter((row) => row.action === "issue.file_resource_list_denied");
+    expect(listDenials).toHaveLength(2);
+    expect(JSON.stringify(listDenials.map((row) => row.details))).not.toContain("README.md");
   });
 
   it("logs successful content reads and denied security-relevant attempts", async () => {
@@ -459,6 +567,75 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(rows.some((row) => row.action === "issue.file_resource_content_read")).toBe(true);
     expect(rows.some((row) => row.action === "issue.file_resource_content_denied")).toBe(true);
     expect(JSON.stringify(rows.map((row) => row.details))).not.toContain(projectRoot);
+  });
+
+  it("uses tighter list-specific rate and concurrency limits", async () => {
+    const { projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    let releaseSlowList: (() => void) | null = null;
+    let slowListStarted: (() => void) | null = null;
+    const slowList = new Promise<void>((resolve) => {
+      releaseSlowList = resolve;
+    });
+    const listStarted = new Promise<void>((resolve) => {
+      slowListStarted = resolve;
+    });
+    const service: WorkspaceFileResourceService = {
+      getIssue: vi.fn(async () => ({ companyId: graph.companyId })),
+      list: vi.fn(async () => {
+        slowListStarted?.();
+        await slowList;
+        return {
+          kind: "workspace_file_list",
+          state: "available",
+          workspace: {
+            provider: "local_fs",
+            workspaceLabel: "Workspace",
+            workspaceKind: "project_workspace",
+            workspaceId: "11111111-1111-4111-8111-111111111111",
+          },
+          query: {
+            workspace: "auto",
+            mode: "all",
+            q: null,
+            limit: 25,
+          },
+          items: [],
+          scannedCount: 0,
+          truncated: false,
+        };
+      }),
+      resolve: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      readContent: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+    };
+    const app = createApp(
+      db,
+      {
+        type: "board",
+        userId: "board-user",
+        companyIds: [graph.companyId],
+        source: "session",
+        isInstanceAdmin: false,
+      },
+      {
+        service,
+        listLimiter: createFileResourceListLimiter({ maxConcurrent: 1, maxRequests: 2, windowMs: 60_000 }),
+      },
+    );
+
+    const first = request(app).get(`/api/issues/${graph.issueId}/file-resources/list`);
+    const firstResponse = first.then((res) => res);
+    await listStarted;
+    const second = await request(app).get(`/api/issues/${graph.issueId}/file-resources/list`);
+    expect(second.status).toBe(429);
+    releaseSlowList?.();
+    expect((await firstResponse).status).toBe(200);
+    const third = await request(app).get(`/api/issues/${graph.issueId}/file-resources/list`);
+    expect(third.status).toBe(429);
   });
 });
 
