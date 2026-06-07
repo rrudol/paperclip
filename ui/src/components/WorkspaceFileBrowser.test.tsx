@@ -2,6 +2,7 @@
 
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import type { WorkspaceFileListItem, WorkspaceFileListResponse } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceFileBrowser, describeUnavailable } from "./WorkspaceFileBrowser";
@@ -82,6 +83,7 @@ function ok(data: WorkspaceFileListResponse) {
 
 describe("WorkspaceFileBrowser", () => {
   let container: HTMLDivElement;
+  const roots: Root[] = [];
 
   beforeEach(() => {
     container = document.createElement("div");
@@ -90,11 +92,17 @@ describe("WorkspaceFileBrowser", () => {
   });
 
   afterEach(() => {
+    for (const root of roots.splice(0)) {
+      act(() => {
+        root.unmount();
+      });
+    }
     container.remove();
   });
 
   function renderBrowser(onOpen = vi.fn()) {
     const root = createRoot(container);
+    roots.push(root);
     act(() => {
       root.render(<WorkspaceFileBrowser issueId="issue-1" onOpen={onOpen} />);
     });
