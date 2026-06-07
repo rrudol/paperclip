@@ -689,8 +689,8 @@ export function workspaceFileResourceService(db: Db) {
   async function resolve(issueId: string, input: {
     path: string;
     workspace?: WorkspaceFileSelector | null;
-  }): Promise<ResolvedWorkspaceResource> {
-    const issue = await getIssue(issueId);
+  }, opts: { issue?: IssueRow } = {}): Promise<ResolvedWorkspaceResource> {
+    const issue = opts.issue ?? await getIssue(issueId);
     const selector = input.workspace ?? "auto";
     const normalized = normalizeWorkspaceRelativePath(input.path);
     const candidates = await listCandidates(issue, selector);
@@ -719,8 +719,12 @@ export function workspaceFileResourceService(db: Db) {
     throw unprocessable("No local-readable workspace is available for this issue", { code: "no_local_workspace" });
   }
 
-  async function list(issueId: string, input: WorkspaceFileListQueryInput = {}): Promise<WorkspaceFileListResponse> {
-    const issue = await getIssue(issueId);
+  async function list(
+    issueId: string,
+    input: WorkspaceFileListQueryInput = {},
+    opts: { issue?: IssueRow } = {},
+  ): Promise<WorkspaceFileListResponse> {
+    const issue = opts.issue ?? await getIssue(issueId);
     const selector = input.workspace ?? "auto";
     const mode = input.mode ?? "all";
     const limit = Math.min(
@@ -809,8 +813,8 @@ export function workspaceFileResourceService(db: Db) {
   async function readContent(issueId: string, input: {
     path: string;
     workspace?: WorkspaceFileSelector | null;
-  }): Promise<WorkspaceFileContent> {
-    const issue = await getIssue(issueId);
+  }, opts: { issue?: IssueRow } = {}): Promise<WorkspaceFileContent> {
+    const issue = opts.issue ?? await getIssue(issueId);
     const selector = input.workspace ?? "auto";
     const normalized = normalizeWorkspaceRelativePath(input.path);
     const candidates = await listCandidates(issue, selector);

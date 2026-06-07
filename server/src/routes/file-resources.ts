@@ -20,9 +20,17 @@ export type WorkspaceFileResourceService = {
     mode?: "all" | "recent" | "changed" | null;
     q?: string | null;
     limit?: number | null;
-  }): Promise<WorkspaceFileListResponse>;
-  resolve(issueId: string, input: { path: string; workspace?: "auto" | "execution" | "project" | null }): Promise<ResolvedWorkspaceResource>;
-  readContent(issueId: string, input: { path: string; workspace?: "auto" | "execution" | "project" | null }): Promise<WorkspaceFileContent>;
+  }, opts?: { issue?: Awaited<ReturnType<WorkspaceFileResourceService["getIssue"]>> }): Promise<WorkspaceFileListResponse>;
+  resolve(
+    issueId: string,
+    input: { path: string; workspace?: "auto" | "execution" | "project" | null },
+    opts?: { issue?: Awaited<ReturnType<WorkspaceFileResourceService["getIssue"]>> },
+  ): Promise<ResolvedWorkspaceResource>;
+  readContent(
+    issueId: string,
+    input: { path: string; workspace?: "auto" | "execution" | "project" | null },
+    opts?: { issue?: Awaited<ReturnType<WorkspaceFileResourceService["getIssue"]>> },
+  ): Promise<WorkspaceFileContent>;
 };
 
 type FileResourceLimiter = {
@@ -192,6 +200,12 @@ function safeListAuditQuery(query: unknown): {
   return { workspace, mode };
 }
 
+function safeAuditDisplayPath(query: unknown): string {
+  if (!query || typeof query !== "object") return "";
+  const path = (query as Record<string, unknown>).path;
+  return typeof path === "string" ? path : "";
+}
+
 function denialReasonFromError(error: unknown) {
   if (!(error instanceof HttpError)) return "unknown";
   const details = error.details;
@@ -322,7 +336,7 @@ export function fileResourceRoutes(db: Db, opts: {
     }
 
     try {
-      const result = await svc.list(req.params.issueId, query);
+      const result = await svc.list(req.params.issueId, query, { issue });
       await logActivity(db, {
         companyId: issue.companyId,
         actorType: actor.actorType,
@@ -360,10 +374,36 @@ export function fileResourceRoutes(db: Db, opts: {
   });
 
   router.get("/issues/:issueId/file-resources/resolve", async (req, res) => {
-    assertBoard(req);
+    try {
+      assertBoard(req);
+    } catch (error) {
+      if (req.actor.type === "agent" && req.actor.companyId) {
+        await logDeniedAttempt({
+          companyId: req.actor.companyId,
+          actor: getActorInfo(req),
+          issueId: req.params.issueId,
+          displayPath: safeAuditDisplayPath(req.query),
+          error,
+          action: "issue.file_resource_resolve_denied",
+        });
+      }
+      throw error;
+    }
     const issue = await svc.getIssue(req.params.issueId);
-    assertCompanyAccess(req, issue.companyId);
     const actor = getActorInfo(req);
+    try {
+      assertCompanyAccess(req, issue.companyId);
+    } catch (error) {
+      await logDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        displayPath: safeAuditDisplayPath(req.query),
+        error,
+        action: "issue.file_resource_resolve_denied",
+      });
+      throw error;
+    }
     const query = readQuery(req.query);
     let release: (() => void) | null = null;
     try {
@@ -380,7 +420,7 @@ export function fileResourceRoutes(db: Db, opts: {
       throw error;
     }
     try {
-      const result = await svc.resolve(req.params.issueId, query);
+      const result = await svc.resolve(req.params.issueId, query, { issue });
       await logActivity(db, {
         companyId: issue.companyId,
         actorType: actor.actorType,
@@ -417,10 +457,34 @@ export function fileResourceRoutes(db: Db, opts: {
   });
 
   router.get("/issues/:issueId/file-resources/content", async (req, res) => {
-    assertBoard(req);
+    try {
+      assertBoard(req);
+    } catch (error) {
+      if (req.actor.type === "agent" && req.actor.companyId) {
+        await logDeniedAttempt({
+          companyId: req.actor.companyId,
+          actor: getActorInfo(req),
+          issueId: req.params.issueId,
+          displayPath: safeAuditDisplayPath(req.query),
+          error,
+        });
+      }
+      throw error;
+    }
     const issue = await svc.getIssue(req.params.issueId);
-    assertCompanyAccess(req, issue.companyId);
     const actor = getActorInfo(req);
+    try {
+      assertCompanyAccess(req, issue.companyId);
+    } catch (error) {
+      await logDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        displayPath: safeAuditDisplayPath(req.query),
+        error,
+      });
+      throw error;
+    }
     const query = readQuery(req.query);
     let release: (() => void) | null = null;
     try {
@@ -438,7 +502,7 @@ export function fileResourceRoutes(db: Db, opts: {
     try {
       let result: WorkspaceFileContent | null = null;
       try {
-        result = await svc.readContent(req.params.issueId, query);
+        result = await svc.readContent(req.params.issueId, query, { issue });
       } catch (error) {
         await logDeniedAttempt({
           companyId: issue.companyId,

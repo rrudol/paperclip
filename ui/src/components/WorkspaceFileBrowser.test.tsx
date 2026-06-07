@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceFileBrowser, describeUnavailable } from "./WorkspaceFileBrowser";
 
 function act(callback: () => void | Promise<void>) {
-  let result: void | Promise<void>;
+  let result: void | Promise<void> | undefined;
   flushSync(() => {
     result = callback();
   });

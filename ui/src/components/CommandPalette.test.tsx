@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "./CommandPalette";
 
 function act(callback: () => void | Promise<void>) {
-  let result: void | Promise<void>;
+  let result: void | Promise<void> | undefined;
   flushSync(() => {
     result = callback();
   });

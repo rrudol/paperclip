@@ -536,6 +536,8 @@ describeEmbeddedPostgres("workspace file resources", () => {
       isInstanceAdmin: false,
     });
 
+    expect((await request(agentApp).get(`/api/issues/${graph.issueId}/file-resources/resolve`).query({ path: "README.md" })).status).toBe(403);
+    expect((await request(boardApp).get(`/api/issues/${graph.issueId}/file-resources/resolve`).query({ path: "README.md" })).status).toBe(403);
     expect((await request(agentApp).get(`/api/issues/${graph.issueId}/file-resources/content`).query({ path: "README.md" })).status).toBe(403);
     expect((await request(boardApp).get(`/api/issues/${graph.issueId}/file-resources/content`).query({ path: "README.md" })).status).toBe(403);
     expect((await request(agentApp).get(`/api/issues/${graph.issueId}/file-resources/list`)).status).toBe(403);
@@ -543,8 +545,13 @@ describeEmbeddedPostgres("workspace file resources", () => {
 
     const rows = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
     const listDenials = rows.filter((row) => row.action === "issue.file_resource_list_denied");
+    const resolveDenials = rows.filter((row) => row.action === "issue.file_resource_resolve_denied");
+    const contentDenials = rows.filter((row) => row.action === "issue.file_resource_content_denied");
     expect(listDenials).toHaveLength(2);
+    expect(resolveDenials).toHaveLength(2);
+    expect(contentDenials).toHaveLength(2);
     expect(JSON.stringify(listDenials.map((row) => row.details))).not.toContain("README.md");
+    expect(JSON.stringify(rows.map((row) => row.details))).not.toContain(projectRoot);
   });
 
   it("logs successful content reads and denied security-relevant attempts", async () => {
