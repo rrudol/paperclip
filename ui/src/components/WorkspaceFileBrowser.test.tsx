@@ -1,10 +1,18 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type { WorkspaceFileListItem, WorkspaceFileListResponse } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceFileBrowser, describeUnavailable } from "./WorkspaceFileBrowser";
+
+function act(callback: () => void | Promise<void>) {
+  let result: void | Promise<void>;
+  flushSync(() => {
+    result = callback();
+  });
+  return result;
+}
 
 const useQueryMock = vi.fn();
 
@@ -132,6 +140,9 @@ describe("WorkspaceFileBrowser", () => {
     useQueryMock.mockReturnValue(ok(availableResponse([createItem()])));
     const { onOpen } = renderBrowser();
     const input = container.querySelector("input")!;
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
     act(() => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     });
