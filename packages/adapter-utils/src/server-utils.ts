@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
+import { accessSync, constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
@@ -1170,11 +1170,118 @@ export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJ
   return env;
 }
 
+// Common per-user install locations for headless CLI tools (opencode, claude,
+// codex, grok, cargo, go, mise, bun, etc.). When the Paperclip server is started
+// from a non-interactive context (launchd, systemd, a CI runner) `process.env.PATH`
+// is often a minimal default that does NOT include `$HOME/.local/bin`,
+// `$HOME/.opencode/bin`, etc. — and the OpenCode installer itself only symlinks
+// into those user dirs, so a missing entry makes the adapter fail with
+// `Command not found in PATH: "opencode"` for every engineering agent.
+//
+// We add any of these dirs that exist on disk and are accessible to the current
+// user to the default PATH so the adapter resolves the common CLIs even when
+// `process.env.PATH` is empty. The check is best-effort and never throws — a
+// missing or unreadable dir is simply skipped.
+const POSIX_USER_TOOL_DIRS = [
+  ".local/bin",
+  ".opencode/bin",
+  ".cargo/bin",
+  ".bun/bin",
+  ".local/share/mise/shims",
+  "go/bin",
+] as const;
+
+function userToolDirsForPlatform(platform: NodeJS.Platform, homedir: string | null): string[] {
+  if (platform === "win32") return [];
+  if (!homedir) return [];
+  return POSIX_USER_TOOL_DIRS.map((rel) => path.join(homedir, rel));
+}
+
+function existingDirsSync(dirs: string[]): string[] {
+  const out: string[] = [];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    try {
+      // `accessSync` is sync because the default PATH is built on the hot path
+      // before each adapter spawn; we want a single fs syscall per candidate
+      // and no async/await overhead at the call site.
+      // eslint-disable-next-line node/no-sync
+      accessSync(dir, fsConstants.X_OK);
+      out.push(dir);
+    } catch {
+      // dir missing or not executable — skip silently
+    }
+  }
+  return out;
+}
+
+function homedirForDefaultPath(): string | null {
+  const fromEnv = process.env.HOME;
+  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
+  try {
+    const home = os.homedir();
+    return typeof home === "string" && home.length > 0 ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultBaseDirsForPlatform(platform: NodeJS.Platform): string[] {
+  if (platform === "win32") {
+    return ["C:\\Windows\\System32", "C:\\Windows", "C:\\Windows\\System32\\Wbem"];
+  }
+  return ["/usr/local/bin", "/opt/homebrew/bin", "/usr/local/sbin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+}
+
+function defaultPathDelimiter(platform: NodeJS.Platform): string {
+  return platform === "win32" ? ";" : ":";
+}
+
+// Merge the per-user tool dirs that exist on disk into the given PATH value.
+// User tool dirs are prepended so they win over system fallbacks (e.g. a stale
+// /usr/local/bin/opencode vs the fresh $HOME/.opencode/bin/opencode). Entries
+// already present in `existingPath` are not duplicated.
+function mergeUserToolDirsIntoPath(
+  platform: NodeJS.Platform,
+  homedir: string | null,
+  existingPath: string | null | undefined,
+): string {
+  const delimiter = defaultPathDelimiter(platform);
+  const baseDirs = defaultBaseDirsForPlatform(platform);
+  const userDirs = existingDirsSync(userToolDirsForPlatform(platform, homedir));
+  const known = new Set(
+    typeof existingPath === "string" && existingPath.length > 0
+      ? existingPath.split(delimiter).filter(Boolean)
+      : baseDirs,
+  );
+  const merged: string[] = [];
+  for (const dir of userDirs) {
+    if (known.has(dir)) continue;
+    merged.push(dir);
+  }
+  if (typeof existingPath === "string" && existingPath.length > 0) {
+    return [...merged, ...existingPath.split(delimiter).filter(Boolean)].join(delimiter);
+  }
+  return [...merged, ...baseDirs].join(delimiter);
+}
+
 export function defaultPathForPlatform() {
   if (process.platform === "win32") {
     return "C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem";
   }
-  return "/usr/local/bin:/opt/homebrew/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
+  return mergeUserToolDirsIntoPath(process.platform, homedirForDefaultPath(), null);
+}
+
+// Returns a PATH that includes the per-user tool dirs that exist on disk,
+// prepended to the existing PATH. Used to make CLI resolution durable when
+// the server's `process.env.PATH` is a minimal default (launchd-spawned, etc.)
+// and lacks `$HOME/.local/bin`, `$HOME/.opencode/bin`, etc.
+export function expandPathWithUserToolDirs(
+  platform: NodeJS.Platform,
+  homedir: string | null,
+  existingPath: string | null | undefined,
+): string {
+  return mergeUserToolDirsIntoPath(platform, homedir, existingPath);
 }
 
 function windowsPathExts(env: NodeJS.ProcessEnv): string[] {
@@ -1305,9 +1412,23 @@ async function resolveSpawnTarget(
 }
 
 export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
-  if (typeof env.Path === "string" && env.Path.length > 0) return env;
-  return { ...env, PATH: defaultPathForPlatform() };
+  const pathKey = typeof env.PATH === "string" && env.PATH.length > 0
+    ? "PATH"
+    : typeof env.Path === "string" && env.Path.length > 0
+      ? "Path"
+      : null;
+  const existingPath = pathKey ? env[pathKey] : null;
+  if (!pathKey) {
+    return { ...env, PATH: defaultPathForPlatform() };
+  }
+  // Enrich the existing PATH with the per-user tool dirs that exist on disk.
+  // This is what makes CLI resolution durable when the server's `process.env.PATH`
+  // is a minimal default (launchd-spawned, etc.) and lacks `$HOME/.local/bin`,
+  // `$HOME/.opencode/bin`, etc. — every adapter benefits (claude, codex, grok,
+  // opencode, ...), not just one. Idempotent and de-duped; never throws.
+  const merged = expandPathWithUserToolDirs(process.platform, homedirForDefaultPath(), existingPath);
+  if (merged === existingPath) return env;
+  return { ...env, [pathKey]: merged };
 }
 
 export async function ensureAbsoluteDirectory(

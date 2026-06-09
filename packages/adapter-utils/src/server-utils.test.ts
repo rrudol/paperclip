@@ -9,7 +9,10 @@ import {
   buildPersistentSkillSnapshot,
   buildRuntimeMountedSkillSnapshot,
   buildInvocationEnvForLogs,
+  defaultPathForPlatform,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  ensurePathInEnv,
+  expandPathWithUserToolDirs,
   materializePaperclipSkillCopy,
   refreshPaperclipWorkspaceEnvForExecution,
   renderPaperclipWakePrompt,
@@ -49,6 +52,127 @@ async function waitForTextMatch(read: () => string, pattern: RegExp, timeoutMs =
   }
   return read().match(pattern);
 }
+
+describe("defaultPathForPlatform / expandPathWithUserToolDirs", () => {
+  it.skipIf(process.platform === "win32")("defaultPathForPlatform includes HOME user tool dirs that exist on disk", () => {
+    const pathValue = defaultPathForPlatform();
+    const home = process.env.HOME;
+    if (home) {
+      const expected = `${home}/.local/bin`;
+      // If the user's $HOME/.local/bin exists, it MUST appear in the default PATH
+      // so a server started from a non-login context can still resolve locally
+      // installed CLIs (opencode, claude, codex, grok, ...).
+      // If it doesn't exist, the test still passes — the user-tool-dir check is
+      // best-effort and just skips missing entries.
+      const expectedExists = (() => {
+        try {
+          // eslint-disable-next-line node/no-sync
+          require("node:fs").accessSync(expected, require("node:fs").constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      if (expectedExists) {
+        expect(pathValue.split(":")).toContain(expected);
+      }
+      // Base system dirs are always present.
+      expect(pathValue.split(":")).toContain("/usr/bin");
+    }
+  });
+
+  it("expandPathWithUserToolDirs prepends a real user tool dir without duplicating existing entries", () => {
+    if (process.platform === "win32") return; // POSIX-only path semantics under test
+    const home = process.env.HOME;
+    if (!home) return;
+    const localBin = `${home}/.local/bin`;
+    const exists = (() => {
+      try {
+        // eslint-disable-next-line node/no-sync
+        require("node:fs").accessSync(localBin, require("node:fs").constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    if (!exists) return; // Skip when the host has no ~/.local/bin (e.g. CI sandbox)
+
+    const existing = "/usr/bin:/bin";
+    const merged = expandPathWithUserToolDirs(process.platform, home, existing);
+    const dirs = merged.split(":");
+    expect(dirs[0]).toBe(localBin);
+    expect(dirs).toContain("/usr/bin");
+    expect(dirs).toContain("/bin");
+    // No duplication.
+    expect(dirs.filter((d) => d === localBin)).toHaveLength(1);
+  });
+
+  it("expandPathWithUserToolDirs does not duplicate user tool dirs already on PATH", () => {
+    if (process.platform === "win32") return;
+    const home = process.env.HOME;
+    if (!home) return;
+    const localBin = `${home}/.local/bin`;
+    const opencodeBin = `${home}/.opencode/bin`;
+    const merged = expandPathWithUserToolDirs(process.platform, home, `${localBin}:${opencodeBin}:/usr/bin`);
+    // Neither user dir should be duplicated.
+    expect(merged.split(":").filter((d) => d === localBin)).toHaveLength(1);
+    expect(merged.split(":").filter((d) => d === opencodeBin)).toHaveLength(1);
+    // And the existing /usr/bin should still be there.
+    expect(merged.split(":")).toContain("/usr/bin");
+  });
+
+  it("expandPathWithUserToolDirs falls back to the platform base dirs when no existing PATH is given", () => {
+    if (process.platform === "win32") return;
+    // Use a non-existent home so no user tool dirs match.
+    const merged = expandPathWithUserToolDirs(process.platform, "/this/path/does/not/exist/at/all", null);
+    expect(merged).toContain("/usr/bin");
+    expect(merged).toContain("/bin");
+  });
+
+  it("ensurePathInEnv enriches a sparse PATH with the user tool dirs that exist on disk", () => {
+    if (process.platform === "win32") return;
+    const home = process.env.HOME;
+    if (!home) return;
+    const localBin = `${home}/.local/bin`;
+    const exists = (() => {
+      try {
+        // eslint-disable-next-line node/no-sync
+        require("node:fs").accessSync(localBin, require("node:fs").constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    if (!exists) return; // Only meaningful on a host that has the user tool dir
+
+    // Simulate the launchd PATH-drop scenario: PATH exists but is missing ~/.local/bin
+    const sparse = "/usr/bin:/bin";
+    const env = ensurePathInEnv({ PATH: sparse });
+    expect(env.PATH?.split(":")).toContain(localBin);
+    expect(env.PATH?.split(":")).toContain("/usr/bin");
+  });
+
+  it("ensurePathInEnv fills a missing PATH with the platform default enriched with user tool dirs", () => {
+    if (process.platform === "win32") return;
+    const env = ensurePathInEnv({});
+    expect(env.PATH).toBeTruthy();
+    expect(env.PATH!.split(":")).toContain("/usr/bin");
+  });
+
+  it("ensurePathInEnv returns the env unchanged when no user tool dirs are reachable on a non-existent HOME", () => {
+    if (process.platform === "win32") return;
+    // We can't override process.env.HOME from inside a test without leaking
+    // to sibling tests, so instead assert the contract indirectly: when
+    // expandPathWithUserToolDirs is called with a non-existent HOME, it
+    // returns the existing PATH unchanged (no spurious prepending).
+    const merged = expandPathWithUserToolDirs(
+      process.platform,
+      "/nonexistent-home-xyz-12345",
+      "/usr/bin:/bin",
+    );
+    expect(merged).toBe("/usr/bin:/bin");
+  });
+});
 
 describe("buildInvocationEnvForLogs", () => {
   it("redacts inline secrets from resolved command metadata", () => {
