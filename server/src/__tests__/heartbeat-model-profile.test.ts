@@ -238,4 +238,33 @@ describe("heartbeat model profile application", () => {
       modelProfile: { requestedBy: "wake_context" },
     });
   });
+
+  it("explains a profile-resolution failure distinctly from a missing adapter profile", () => {
+    const modelProfile = resolveModelProfileApplication({
+      adapterModelProfiles: [],
+      agentRuntimeConfig: {},
+      issueModelProfile: null,
+      contextSnapshot: { modelProfile: "cheap" },
+      profileResolutionFallbackReason: "adapter_profile_resolution_failed",
+    });
+
+    const result = buildUnsupportedModelProfileAdapterResult({
+      adapterType: "claude_local",
+      modelProfile,
+    });
+
+    expect(modelProfile).toMatchObject({
+      requested: "cheap",
+      applied: null,
+      fallbackReason: "adapter_profile_resolution_failed",
+    });
+    expect(result.errorCode).toBe("model_profile_not_supported");
+    expect(result.errorMessage).toMatch(/Failed to resolve model profiles/);
+    expect(result.errorMessage).toMatch(/claude_local/);
+    expect(result.errorMessage).toMatch(/cheap/);
+    expect(result.errorMessage).not.toMatch(/no-op fallback/);
+    expect(result.errorMeta).toMatchObject({
+      modelProfile: { fallbackReason: "adapter_profile_resolution_failed" },
+    });
+  });
 });
