@@ -3403,23 +3403,40 @@ export function agentRoutes(
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
-    assertBoard(req);
     const runId = req.params.runId as string;
     const existing = await heartbeat.getRun(runId);
-    if (existing) {
-      assertCompanyAccess(req, existing.companyId);
+    const isAgentSelfCancel =
+      existing !== null &&
+      req.actor.type === "agent" &&
+      existing.companyId === req.actor.companyId &&
+      existing.agentId === req.actor.agentId;
+
+    if (!isAgentSelfCancel) {
+      assertBoard(req);
+      if (existing) {
+        assertCompanyAccess(req, existing.companyId);
+      }
     }
+
     const run = await heartbeat.cancelRun(runId);
 
     if (run) {
+      const actor = getActorInfo(req);
+      const isAgentAudit = req.actor.type === "agent";
       await logActivity(db, {
         companyId: run.companyId,
-        actorType: "user",
-        actorId: req.actor.userId ?? "board",
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
         action: "heartbeat.cancelled",
         entityType: "heartbeat_run",
         entityId: run.id,
-        details: { agentId: run.agentId },
+        details: {
+          agentId: run.agentId,
+          source: isAgentAudit ? "agent_self_cancel" : "board_cancel",
+          cancelledByRunId: isAgentAudit ? actor.runId : null,
+        },
       });
     }
 

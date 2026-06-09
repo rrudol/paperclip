@@ -1513,4 +1513,102 @@ describe.sequential("agent permission routes", () => {
     expect(res.status).toBe(403);
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
   });
+
+  it("permits agent self-cancel when caller agentId matches target run agentId", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-self",
+      companyId,
+      agentId,
+      status: "running",
+    });
+    mockHeartbeatService.cancelRun.mockResolvedValue({
+      id: "run-self",
+      companyId,
+      agentId,
+      status: "cancelled",
+    });
+    mockLogActivity.mockClear();
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-caller",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).post("/api/heartbeat-runs/run-self/cancel").send({}));
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("run-self");
+    expect(mockLogActivity).toHaveBeenCalledTimes(1);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        companyId,
+        action: "heartbeat.cancelled",
+        entityType: "heartbeat_run",
+        entityId: "run-self",
+        actorType: "agent",
+        actorId: agentId,
+        agentId,
+        runId: "run-caller",
+        details: expect.objectContaining({
+          agentId,
+          source: "agent_self_cancel",
+          cancelledByRunId: "run-caller",
+        }),
+      }),
+    );
+  });
+
+  it("rejects agent cancel when caller agentId differs from target run agentId", async () => {
+    const otherAgentId = "99999999-9999-4999-8999-999999999999";
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-other",
+      companyId,
+      agentId: otherAgentId,
+      status: "running",
+    });
+    mockLogActivity.mockClear();
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-caller",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).post("/api/heartbeat-runs/run-other/cancel").send({}));
+
+    expect(res.status).toBe(403);
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent cancel across companies", async () => {
+    const otherCompanyId = "88888888-8888-4888-8888-888888888888";
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-cross-company",
+      companyId: otherCompanyId,
+      agentId,
+      status: "running",
+    });
+    mockLogActivity.mockClear();
+
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-caller",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl).post("/api/heartbeat-runs/run-cross-company/cancel").send({}));
+
+    expect(res.status).toBe(403);
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
 });
